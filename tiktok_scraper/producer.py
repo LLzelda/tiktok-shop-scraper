@@ -1,21 +1,20 @@
-"""Kafka producer helper - offloads writes from the scraper loop."""
-import asyncio, json, logging
 from aiokafka import AIOKafkaProducer
-from .config import KAFKA_BOOTSTRAP, KAFKA_TOPIC
-
-log = logging.getLogger(__name__)
+import json, os
 
 class KafkaWriter:
-    def __init__(self):
-        self._producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP)
+    def __init__(self, topic: str):
+        self._topic = topic
+        self._producer = AIOKafkaProducer(
+            bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP", "kafka:9092"),
+            compression_type="gzip",
+            value_serializer=lambda v: json.dumps(v).encode(),
+        )
 
-    async def __aenter__(self):
+    async def start(self):
         await self._producer.start()
-        return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def send(self, payload: dict):
+        await self._producer.send_and_wait(self._topic, value=payload)
+
+    async def stop(self):
         await self._producer.stop()
-
-    async def send(self, record: dict):
-        await self._producer.send_and_wait(KAFKA_TOPIC, json.dumps(record).encode())
-        log.debug("→ kafka:%s", record.get("product_id"))

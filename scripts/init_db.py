@@ -1,11 +1,11 @@
-# scripts/init_db.py
-import os, sqlalchemy as sa
+import sqlalchemy as sa
+from models import Base, ENGINE
 
-engine = sa.create_engine(os.getenv("DB_URL"))
-with engine.begin() as cx:
+with ENGINE.begin() as cx:
+    Base.metadata.create_all(cx)
     cx.execute("""
-      CREATE TABLE IF NOT EXISTS shop_seed (
-        shop_id  BIGINT PRIMARY KEY,
-        added_at TIMESTAMPTZ DEFAULT NOW()
-      )
+        CREATE TABLE IF NOT EXISTS seller_seed (
+            seller_id BIGINT PRIMARY KEY,
+            added_at  TIMESTAMPTZ DEFAULT NOW()
+        );
     """)
