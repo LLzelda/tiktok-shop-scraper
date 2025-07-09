@@ -1,95 +1,189 @@
-import asyncio, logging, os, random, time, json, datetime as dt
+import os, asyncio, json, logging, random, time
+from datetime import datetime, date
+from typing import List
+
 import sqlalchemy as sa
-from playwright.async_api import async_playwright
-from proxy import pool_from_env
-from producer import KafkaWriter
-from config import DB_URL, MAX_REQ_PER_MIN, SCROLL_PAGES, RANDOM_SLEEP_MIN, RANDOM_SLEEP_MAX
-from models import ProductList, ProductDetail, ENGINE
+from playwright.async_api import async_playwright, Response, Error as PwError
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+from .proxy import pool_from_env, ProxyPool
+from .producer import KafkaWriter
+from etl.models import ENGINE, ProductList, ProductDetail
+#from .signer import sign_url
 
-ITEM_DETAIL      = "https://www.tiktok.com/api/shop/item_detail/?item_id={product_id}"
-GET_SHOP_DETAIL  = "https://www.tiktok.com/api/shop/get_shop_detail/?seller_id={seller_id}"
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
 
-async def fetch_seller_seeds(limit=50):
-    with ENGINE.begin() as cx:
-        rows = cx.execute(sa.text("SELECT seller_id FROM seller_seed ORDER BY added_at DESC LIMIT :n"), {"n": limit})
+DB_RETRIES = 10
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ------------------------------------------------------------
+def wait_engine(max_wait: int = 30) -> sa.Engine:
+    """Block until Postgres is reachable (container-start race)."""
+    for _ in range(DB_RETRIES):
+        try:
+            with ENGINE.connect():
+                return ENGINE
+        except sa.exc.OperationalError as e:
+            logger.info("DB not ready: %s – retrying…", e.args[0].split("\n")[0])
+            time.sleep(3)
+    raise RuntimeError("Postgres never became ready")
+
+async def fetch_json(page, url: str, *, retries: int = 3, wait: int = 3) -> dict:
+    """GET → JSON with retries, bans CAPTCHA/HTML bodies."""
+    for i in range(retries):
+        try:
+            resp: Response = await page.request.get(url, timeout=15_000)
+            if resp.ok:
+                try:
+                    return await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    logger.warning("Bad JSON (%s chars) on %s", len(text), url)
+            else:
+                logger.warning("HTTP %s on %s", resp.status, url)
+        except PwError as e:
+            logger.warning("Playwright error %s on %s", e, url)
+        await asyncio.sleep(wait)
+    raise RuntimeError(f"Failed to fetch JSON after {retries} attempts: {url}")
+
+# endpoint that works for ALL sellers (even FBT)
+SELLER_ITEMS = (
+    "https://www.tiktok.com/api/shop/seller_product_list/"
+    "?seller_id={seller_id}&count=100&cursor={cursor}"
+)
+async def signed_fetch(page, url: str) -> dict:
+
+    return await page.evaluate(
+        """async u => {
+               const r = await fetch(u, {credentials: 'include'});
+               if (!r.ok) throw new Error('HTTP ' + r.status);
+               return await r.json();
+        }""",
+        url
+    )
+# ──────────────────────────────────────────────────────────────────────────────
+# Core crawler
+# ──────────────────────────────────────────────────────────────────────────────
+async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
+    proxy = await pool.next()
+    pw_kwargs = {"proxy": {"server": f"http://{proxy}"}} if proxy else {}
+
+    playwright = await async_playwright().start()
+    browser    = await playwright.chromium.launch(headless=True, **pw_kwargs)
+    context    = await browser.new_context()
+    page       = await context.new_page()
+
+    try:
+        # 1. Hit a trivial TikTok page once to obtain msToken cookie
+        await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
+
+        cursor   = 0
+        batch_no = 0
+        while True:
+            url = SELLER_ITEMS.format(seller_id=seller_id, cursor=cursor)
+            try:
+                j = await signed_fetch(page, url)
+                print(j)
+            except Exception as e:
+                logger.warning("seller %s – fetch error %s, rotating proxy", seller_id, e)
+                await pool.ban(proxy)
+                return
+
+            # guard against soft-ban payloads
+            if "data" not in j or "products" not in j["data"]:
+                logger.warning("seller %s – missing data key, rotating proxy", seller_id)
+                await pool.ban(proxy)
+                return
+
+            items = j["data"]["products"]
+            if not items:
+                break
+
+            now = datetime.utcnow()
+            batch_no += 1
+
+            # ── push to Kafka
+            await kafka.send_many([
+                {
+                    "product_id": it["product_id"],
+                    "seller_id":  seller_id,
+                    "price":      it["price"],
+                    "currency":   it.get("currency", "USD"),
+                    "snapshot_ts": now.isoformat()
+                }
+                for it in items
+            ])
+
+            # ── upsert DB
+            with ENGINE.begin() as cx:
+                for it in items:
+                    price_cents = int(float(it["price"]) * 100)
+                    cx.execute(sa.insert(ProductList).values(
+                        product_id   = it["product_id"],
+                        seller_id    = seller_id,
+                        price_cents  = price_cents,
+                        currency     = it.get("currency", "USD"),
+                        updated_at   = now
+                    ).on_conflict_do_update(
+                        index_elements=[ProductList.product_id],
+                        set_={
+                            "price_cents": price_cents,
+                            "currency":    it.get("currency", "USD"),
+                            "updated_at":  now
+                        }
+                    ))
+
+                    cx.execute(sa.insert(ProductDetail).values(
+                        product_id   = it["product_id"],
+                        seller_id    = seller_id,
+                        snap_date    = date.today(),
+                        price_cents  = price_cents,
+                        currency     = it.get("currency", "USD"),
+                        stock        = None
+                    ).on_conflict_do_nothing())
+
+            if not j["data"].get("has_more"):
+                break
+            cursor = j["data"]["cursor"]
+            await asyncio.sleep(random.uniform(2, 4))
+
+        logger.info("seller %s done – %d batch(es)", seller_id, batch_no)
+
+    finally:
+        await browser.close()
+        await playwright.stop()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Seed fetch
+# ──────────────────────────────────────────────────────────────────────────────
+async def fetch_seller_seeds(limit: int = 5) -> List[int]:
+    eng = wait_engine()
+    with eng.begin() as cx:
+        rows = cx.execute(
+            sa.text("SELECT seller_id FROM seller_seed ORDER BY added_at DESC LIMIT :n"),
+            {"n": limit}
+        )
         return [r[0] for r in rows]
 
-async def upsert_latest(cx, row: dict):
-    sql = sa.text("""
-        INSERT INTO product_list (product_id, seller_id, shop_id, title, price_cents, currency, sold_count, inventory, rating)
-        VALUES (:product_id,:seller_id,:shop_id,:title,:price_cents,:currency,:sold_count,:inventory,:rating)
-        ON CONFLICT (product_id)
-        DO UPDATE SET
-          price_cents = EXCLUDED.price_cents,
-          sold_count  = EXCLUDED.sold_count,
-          inventory   = EXCLUDED.inventory,
-          rating      = EXCLUDED.rating,
-          updated_at  = now()
-    """)
-    cx.execute(sql, row)
-
-async def insert_daily(cx, row: dict):
-    sql = sa.text("""
-        INSERT INTO product_detail (product_id, snapshot_date, seller_id, shop_id, title, price_cents, currency, sold_count, inventory, rating)
-        VALUES (:product_id,:snapshot_date,:seller_id,:shop_id,:title,:price_cents,:currency,:sold_count,:inventory,:rating)
-        ON CONFLICT (product_id, snapshot_date) DO NOTHING
-    """)
-    cx.execute(sql, row)
-
-async def scrape_product(page, product_id, seller_id, shop_id, kafka):
-    j = await (await page.request.get(ITEM_DETAIL.format(product_id=product_id))).json()
-    basic = j.get("basicInfo", {})
-    row = {
-        "product_id": int(product_id),
-        "seller_id": int(seller_id),
-        "shop_id": int(shop_id) if shop_id else None,
-        "title": basic.get("title"),
-        "price_cents": int(float(basic.get("price", 0)) * 100),
-        "currency": basic.get("currency", "USD"),
-        "sold_count": basic.get("sales", 0),
-        "inventory": basic.get("stock", 0),
-        "rating": basic.get("rating", None),
-        "snapshot_date": dt.date.today(),
-    }
-
-    # send to Kafka as well(optional for downstream stream consumers)
-    await kafka.send(row)
-
-    #write to DB
-    with ENGINE.begin() as cx:
-        await asyncio.get_event_loop().run_in_executor(None, upsert_latest, cx, row)
-        await asyncio.get_event_loop().run_in_executor(None, insert_daily, cx, row)
-
-async def crawl_seller(seller_id: int, kafka, proxy_pool):
-    proxy = await proxy_pool.next()
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True,
-            proxy={"server": f"http://{proxy}"} if proxy else None,
-            args=["--no-sandbox"])
-        page = await browser.new_page()
-
-        meta = await page.request.get(GET_SHOP_DETAIL.format(seller_id=seller_id))
-        sj = await meta.json()
-        shop_id = sj.get("shop_info", {}).get("shop_id") or None
-        product_ids = sj.get("shop_info", {}).get("featured_product_ids", [])[:20]
-
-        for pid in product_ids:
-            await scrape_product(page, pid, seller_id, shop_id, kafka)
-            await asyncio.sleep(random.uniform(RANDOM_SLEEP_MIN, RANDOM_SLEEP_MAX))
-
-        await browser.close()
-
-async def main():
-    kafka = KafkaWriter("tiktok_raw")
+# ──────────────────────────────────────────────────────────────────────────────
+# Main entry
+# ──────────────────────────────────────────────────────────────────────────────
+async def main() -> None:
+    kafka = KafkaWriter(os.getenv("KAFKA_TOPIC", "tiktok_raw"))
     await kafka.start()
 
-    proxy_pool = pool_from_env([])
-    sellers = await fetch_seller_seeds()
-    await asyncio.gather(*(crawl_seller(s, kafka, proxy_pool) for s in sellers))
+    try:
+        proxy_pool = pool_from_env(os.getenv("PROXY_POOL", "").split(","))
+        sellers = await fetch_seller_seeds()
+        if not sellers:
+            logger.warning("No seller_seed rows – nothing to crawl.")
+            return
 
-    await kafka.stop()
+        await asyncio.gather(*(crawl_seller(s, kafka, proxy_pool) for s in sellers))
+    finally:
+        await kafka.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

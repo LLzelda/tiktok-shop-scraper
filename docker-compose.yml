@@ -5,6 +5,11 @@ services:
       POSTGRES_USER: tiktok
       POSTGRES_PASSWORD: tiktok
       POSTGRES_DB: tiktok
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tiktok"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     ports: ["5432:5432"]
 
   zookeeper:
@@ -41,7 +46,7 @@ services:
 
   scraper:
     build: .
-    env_file: .env.demo
+    env_file: .env
     environment:
       POSTGRES_DSN: postgresql://tiktok:tiktok@db:5432/tiktok
       KAFKA_BOOTSTRAP: kafka:9092
@@ -54,11 +59,13 @@ services:
         max-file: "5" 
     depends_on: [kafka, db]
   
-  db-init:
+  db-init:             
     image: python:3.11-slim
-    command: python /scripts/init_db.py
     volumes:
       - ./scripts:/scripts
+    command: python /scripts/init_db.py
     environment:
-      DB_URL: postgresql+psycopg://scraper:password@db/scraper
-    depends_on: [db]
+      DB_URL: postgresql+psycopg://tiktok:tiktok@db:5432/tiktok
+    depends_on:
+      db:
+        condition: service_healthy

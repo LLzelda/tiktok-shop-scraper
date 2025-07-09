@@ -3,7 +3,8 @@ playwright-stealth==2.0.0
 aiokafka==0.10.0
 pydantic==2.8.0
 sqlalchemy==2.0.32
-psycopg2-binary==2.9.9
+psycopg[binary]==3.1.18
+#psycopg2-binary==2.9.9
 pandas==2.2.2
 python-dotenv==1.0.1
 #execjs==1.4.1
