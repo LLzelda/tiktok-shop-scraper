@@ -2,6 +2,7 @@ import asyncio, json, logging, re, os, sys
 from playwright.async_api import async_playwright
 from .config import SHOP_BATCH_SIZE
 from .proxy import pool_from_env, PROXY_POOL
+#from .proxy import pool_from_env 
 from .producer import KafkaWriter
 import sqlalchemy as sa, pandas as pd
 from .config import POSTGRES_DSN

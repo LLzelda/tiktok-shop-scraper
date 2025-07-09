@@ -1,12 +1,13 @@
 playwright==1.44.0
-playwright-stealth==1.5.4
+playwright-stealth==2.0.0
 aiokafka==0.10.0
 pydantic==2.8.0
 sqlalchemy==2.0.32
 psycopg2-binary==2.9.9
 pandas==2.2.2
 python-dotenv==1.0.1
-execjs==1.4.1
+#execjs==1.4.1
+PyExecJS==1.5.1
 fastjsonschema==2.19.1
 prometheus-client==0.20.0
 #Note that airflow & kafka images provide additional deps at runtime
