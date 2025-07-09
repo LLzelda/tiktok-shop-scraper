@@ -5,13 +5,6 @@ from typing import List, Optional
 
 
 class ProxyPool:
-    """round-robin helper with a simple ban circuit-breaker.
-
-    • Keeps an in-memory list of proxies (strings of the form
-      `user:pass@host:port` or just `host:port`).
-    • `None` in the list means *direct-to-internet* (no proxy).
-    • Thread-safe for asyncio coroutines via an internal lock.
-    """
 
     def __init__(self, proxies: List[Optional[str]]):
         # ‑‑ deduplicate while preserving order
