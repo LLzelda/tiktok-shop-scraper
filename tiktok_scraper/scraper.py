@@ -3,7 +3,7 @@ from datetime import datetime, date
 from typing import List
 
 import sqlalchemy as sa
-from playwright.async_api import async_playwright, Response, Error as PwError
+from playwright.async_api import async_playwright, Response, Error as PwError, TimeoutError as PwTimeout
 
 from .proxy import pool_from_env, ProxyPool
 from .producer import KafkaWriter
@@ -14,6 +14,20 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 DB_RETRIES = 10
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def seller_session(playwright, proxy):
+    browser = await playwright.chromium.launch(headless=True, **proxy)
+    ctx     = await browser.new_context()
+    page    = await ctx.new_page()
+    try:
+        # small page to set cookies & JS bundle
+        await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
+        yield page
+    finally:
+        await browser.close()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -65,6 +79,7 @@ async def signed_fetch(page, url: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 # Core crawler
 # ──────────────────────────────────────────────────────────────────────────────
+# no sign..
 async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
     proxy = await pool.next()
     pw_kwargs = {"proxy": {"server": f"http://{proxy}"}} if proxy else {}
@@ -75,24 +90,54 @@ async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
     page       = await context.new_page()
 
     try:
-        # 1. Hit a trivial TikTok page once to obtain msToken cookie
+        # hit a trivial page once to set msToken cookie
         await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
+
+        async def trigger_catalog(cur: int):
+            await page.evaluate(
+                """async ({sid, cur}) => {
+                       const url = `/api/shop/seller_product_list/?seller_id=${sid}&count=100&cursor=${cur}`;
+                       await fetch(url, {credentials:'include'});
+                }""",
+                {"sid": seller_id, "cur": cur}
+            )
+
+        def is_catalog(resp):
+            u = resp.url
+            return "seller_product_list" in u and f"seller_id={seller_id}" in u
 
         cursor   = 0
         batch_no = 0
-        while True:
-            url = SELLER_ITEMS.format(seller_id=seller_id, cursor=cursor)
-            try:
-                j = await signed_fetch(page, url)
-                print(j)
-            except Exception as e:
-                logger.warning("seller %s – fetch error %s, rotating proxy", seller_id, e)
-                await pool.ban(proxy)
-                return
 
-            # guard against soft-ban payloads
+        while True:
+            # ▼ wait up to 60 s, log all outgoing URLs
+            try:
+                page.on("request", lambda req: 
+                        req.url.endswith("seller_product_list") and logger.debug("REQ %s", req.url))
+                async with page.expect_response(is_catalog, timeout=60_000) as wait:
+                    await trigger_catalog(cursor)
+                resp = await wait.value
+            # except PwTimeout:
+            #     logger.warning("seller %s - catalogue timeout, rotating proxy", seller_id)
+            #     await pool.ban(proxy)
+            #     return
+            #brutallllll
+            except PwTimeout:
+                logger.warning("seller %s - catalogue timeout, rotating proxy", seller_id)
+                await pool.ban(proxy)
+                proxy = await pool.next()
+                await context.close()
+                context = await browser.new_context(proxy={"server": f"http://{proxy}"} if proxy else None)
+                page    = await context.new_page()
+                await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
+                continue
+                              # retry with the new proxy
+            j = await resp.json()
+            print(j)
+
+            # soft-ban guard
             if "data" not in j or "products" not in j["data"]:
-                logger.warning("seller %s – missing data key, rotating proxy", seller_id)
+                logger.warning("seller %s - missing data key, rotating proxy", seller_id)
                 await pool.ban(proxy)
                 return
 
@@ -100,16 +145,16 @@ async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
             if not items:
                 break
 
-            now = datetime.utcnow()
+            now      = datetime.utcnow()
             batch_no += 1
 
             # ── push to Kafka
             await kafka.send_many([
                 {
-                    "product_id": it["product_id"],
-                    "seller_id":  seller_id,
-                    "price":      it["price"],
-                    "currency":   it.get("currency", "USD"),
+                    "product_id":  it["product_id"],
+                    "seller_id":   seller_id,
+                    "price":       it["price"],
+                    "currency":    it.get("currency", "USD"),
                     "snapshot_ts": now.isoformat()
                 }
                 for it in items
@@ -133,7 +178,6 @@ async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
                             "updated_at":  now
                         }
                     ))
-
                     cx.execute(sa.insert(ProductDetail).values(
                         product_id   = it["product_id"],
                         seller_id    = seller_id,
@@ -148,7 +192,7 @@ async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
             cursor = j["data"]["cursor"]
             await asyncio.sleep(random.uniform(2, 4))
 
-        logger.info("seller %s done – %d batch(es)", seller_id, batch_no)
+        logger.info("seller %s done - %d batch(es)", seller_id, batch_no)
 
     finally:
         await browser.close()
