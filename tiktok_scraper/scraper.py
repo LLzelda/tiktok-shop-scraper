@@ -10,6 +10,10 @@ from .producer import KafkaWriter
 from etl.models import ENGINE, ProductList, ProductDetail
 #from .signer import sign_url
 
+#a trick to not be like a BOTTTTT
+from bs4 import BeautifulSoup
+import re
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,39 @@ async def seller_session(playwright, proxy):
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ------------------------------------------------------------
+JSON_PAT = re.compile(r'"product_detail"\s*:\s*({.*?})\s*,\s*"seller_info"', re.S)
+async def html_fallback(page) -> dict | None:
+    """
+    Parse PDP HTML for embedded product_detail JSON.
+
+    Works with both:
+      • <script id="__NEXT_DATA__">… "product_detail":{…}</script>
+      • <script id="sigi-pb-data"> window._SSR_DATA_ = { product_detail: … }</script>
+    """
+    html = await page.content()
+
+    # 1. quick regex – fastest
+    m = JSON_PAT.search(html)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+
+    # 2. slower BeautifulSoup walk
+    soup  = BeautifulSoup(html, "lxml")
+    for node in soup.find_all("script"):
+        if not node.string:
+            continue
+        if "product_detail" in node.string:
+            try:
+                m2 = JSON_PAT.search(node.string)
+                if m2:
+                    return json.loads(m2.group(1))
+            except Exception:
+                continue
+    return None
+    
 def wait_engine(max_wait: int = 30) -> sa.Engine:
     """Block until Postgres is reachable (container-start race)."""
     for _ in range(DB_RETRIES):
@@ -80,7 +117,10 @@ async def signed_fetch(page, url: str) -> dict:
 # Core crawler
 # ──────────────────────────────────────────────────────────────────────────────
 # no sign..
-async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
+
+PDP_URL = "https://www.tiktok.com/shop/pdp/{pid}"
+PAGE_DATA = "/api/shop/pdp_desktop/page_data/"
+async def crawl_product(product_id: int, kafka: KafkaWriter, pool: ProxyPool):
     proxy = await pool.next()
     pw_kwargs = {"proxy": {"server": f"http://{proxy}"}} if proxy else {}
 
@@ -90,122 +130,117 @@ async def crawl_seller(seller_id: int, kafka: KafkaWriter, pool: ProxyPool):
     page       = await context.new_page()
 
     try:
-        # hit a trivial page once to set msToken cookie
+        # warm cookies
         await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
 
-        async def trigger_catalog(cur: int):
-            await page.evaluate(
-                """async ({sid, cur}) => {
-                       const url = `/api/shop/seller_product_list/?seller_id=${sid}&count=100&cursor=${cur}`;
-                       await fetch(url, {credentials:'include'});
-                }""",
-                {"sid": seller_id, "cur": cur}
-            )
+        def is_pdp_resp(resp):
+            return PAGE_DATA in resp.url and str(product_id) in resp.url
 
-        def is_catalog(resp):
-            u = resp.url
-            return "seller_product_list" in u and f"seller_id={seller_id}" in u
+        try:
+            async with page.expect_response(is_pdp_resp, timeout=60_000) as wait:
+                await page.goto(PDP_URL.format(pid=product_id), wait_until="networkidle")
+            data = await (await wait.value).json()
+            print(data)
+        except PwTimeout:
+            # fallback: call page_data ourselves inside the DOM
 
-        cursor   = 0
-        batch_no = 0
+            #a helper
+            async def fetch_pdp_json(page, url: str) -> dict | None:
+                return await page.evaluate(
+                    """async u => {
+                        const r = await fetch(u, {credentials:'include'});
+                        const txt = await r.text();
+                        if (!txt.trim().startsWith('{')) return {__html: txt.slice(0,200)};
+                        return JSON.parse(txt);
+                    }""",
+                    url
+                )
+            url = f"{PAGE_DATA}?product_id={product_id}"
+            #try:
+                # data = await page.evaluate(
+                #     """async u => (await fetch(u,{credentials:'include'})).json()""",
+                #     url
+                # )
+            data = await fetch_pdp_json(page, url)
 
-        while True:
-            # ▼ wait up to 60 s, log all outgoing URLs
-            try:
-                page.on("request", lambda req: 
-                        req.url.endswith("seller_product_list") and logger.debug("REQ %s", req.url))
-                async with page.expect_response(is_catalog, timeout=60_000) as wait:
-                    await trigger_catalog(cursor)
-                resp = await wait.value
-            # except PwTimeout:
-            #     logger.warning("seller %s - catalogue timeout, rotating proxy", seller_id)
-            #     await pool.ban(proxy)
-            #     return
-            #brutallllll
-            except PwTimeout:
-                logger.warning("seller %s - catalogue timeout, rotating proxy", seller_id)
-                await pool.ban(proxy)
-                proxy = await pool.next()
-                await context.close()
-                context = await browser.new_context(proxy={"server": f"http://{proxy}"} if proxy else None)
-                page    = await context.new_page()
-                await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
-                continue
-                              # retry with the new proxy
-            j = await resp.json()
-            print(j)
+            #     if data is None or "__html" in data:
+            #         logger.warning("product %s - blocked (HTML body starts: %s…) rotating proxy",
+            #                     product_id, (data or {}).get("__html", ""))
+            #         await pool.ban(proxy)
+            #         return
+            if data is None or "__html" in data:
+                #trick: second fallback: parse embedded HTML JSON
+                data = await html_fallback(page)
 
-            # soft-ban guard
-            if "data" not in j or "products" not in j["data"]:
-                logger.warning("seller %s - missing data key, rotating proxy", seller_id)
+            if not data:
+                logger.warning("product %s - blocked & no JSON, rotating proxy", product_id)
                 await pool.ban(proxy)
                 return
+            # except Exception as e:
+            #     logger.warning("product %s - fallback fetch failed %s, rotating proxy",
+            #                    product_id, e)
+            #     await pool.ban(proxy)
+            #     return
+        # validation
+        if "seller_info" not in data or "product_info" not in data:
+            logger.warning("product %s - missing keys, rotating proxy", product_id)
+            await pool.ban(proxy)
+            return
 
-            items = j["data"]["products"]
-            if not items:
-                break
+        seller_id = int(data["seller_info"]["seller_id"])
+        price     = data["product_info"]["price"]
+        currency  = data["product_info"].get("currency", "USD")
 
-            now      = datetime.utcnow()
-            batch_no += 1
+        now = datetime.utcnow()
 
-            # ── push to Kafka
-            await kafka.send_many([
-                {
-                    "product_id":  it["product_id"],
-                    "seller_id":   seller_id,
-                    "price":       it["price"],
-                    "currency":    it.get("currency", "USD"),
-                    "snapshot_ts": now.isoformat()
-                }
-                for it in items
-            ])
+        await kafka.send({
+            "product_id":  product_id,
+            "seller_id":   seller_id,
+            "price":       price,
+            "currency":    currency,
+            "snapshot_ts": now.isoformat()
+        })
 
-            # ── upsert DB
-            with ENGINE.begin() as cx:
-                for it in items:
-                    price_cents = int(float(it["price"]) * 100)
-                    cx.execute(sa.insert(ProductList).values(
-                        product_id   = it["product_id"],
-                        seller_id    = seller_id,
-                        price_cents  = price_cents,
-                        currency     = it.get("currency", "USD"),
-                        updated_at   = now
-                    ).on_conflict_do_update(
-                        index_elements=[ProductList.product_id],
-                        set_={
-                            "price_cents": price_cents,
-                            "currency":    it.get("currency", "USD"),
-                            "updated_at":  now
-                        }
-                    ))
-                    cx.execute(sa.insert(ProductDetail).values(
-                        product_id   = it["product_id"],
-                        seller_id    = seller_id,
-                        snap_date    = date.today(),
-                        price_cents  = price_cents,
-                        currency     = it.get("currency", "USD"),
-                        stock        = None
-                    ).on_conflict_do_nothing())
+        price_cents = int(float(price) * 100)
+        with ENGINE.begin() as cx:
+            cx.execute(sa.insert(ProductList).values(
+                product_id  = product_id,
+                seller_id   = seller_id,
+                price_cents = price_cents,
+                currency    = currency,
+                updated_at  = now
+            ).on_conflict_do_update(
+                index_elements=[ProductList.product_id],
+                set_={"price_cents": price_cents,
+                      "currency":    currency,
+                      "updated_at":  now}
+            ))
 
-            if not j["data"].get("has_more"):
-                break
-            cursor = j["data"]["cursor"]
-            await asyncio.sleep(random.uniform(2, 4))
+            cx.execute(sa.insert(ProductDetail).values(
+                product_id  = product_id,
+                seller_id   = seller_id,
+                snap_date   = date.today(),
+                price_cents = price_cents,
+                currency    = currency,
+                stock       = None
+            ).on_conflict_do_nothing())
 
-        logger.info("seller %s done - %d batch(es)", seller_id, batch_no)
+        logger.info("product %s scraped for seller %s", product_id, seller_id)
 
     finally:
         await browser.close()
         await playwright.stop()
 
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Seed fetch
 # ──────────────────────────────────────────────────────────────────────────────
-async def fetch_seller_seeds(limit: int = 5) -> List[int]:
+async def fetch_product_seeds(limit: int = 20) -> List[int]:
     eng = wait_engine()
     with eng.begin() as cx:
         rows = cx.execute(
-            sa.text("SELECT seller_id FROM seller_seed ORDER BY added_at DESC LIMIT :n"),
+            sa.text("SELECT product_id FROM product_seed ORDER BY added_at DESC LIMIT :n"),
             {"n": limit}
         )
         return [r[0] for r in rows]
@@ -219,12 +254,12 @@ async def main() -> None:
 
     try:
         proxy_pool = pool_from_env(os.getenv("PROXY_POOL", "").split(","))
-        sellers = await fetch_seller_seeds()
-        if not sellers:
-            logger.warning("No seller_seed rows – nothing to crawl.")
+        products   = await fetch_product_seeds()
+        if not products:
+            logger.warning("No product_seed rows – nothing to crawl.")
             return
 
-        await asyncio.gather(*(crawl_seller(s, kafka, proxy_pool) for s in sellers))
+        await asyncio.gather(*(crawl_product(p, kafka, proxy_pool) for p in products))
     finally:
         await kafka.stop()
 

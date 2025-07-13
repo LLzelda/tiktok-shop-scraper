@@ -11,4 +11,7 @@ python-dotenv==1.0.1
 PyExecJS==1.5.1
 fastjsonschema==2.19.1
 prometheus-client==0.20.0
+
+beautifulsoup4==4.12.3
+lxml==5.2.1
 #Note that airflow & kafka images provide additional deps at runtime
