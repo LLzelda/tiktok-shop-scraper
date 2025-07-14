@@ -51,13 +51,16 @@ services:
       POSTGRES_DSN: postgresql://tiktok:tiktok@db:5432/tiktok
       KAFKA_BOOTSTRAP: kafka:9092
       PROXY_POOL: ""  # put proxies here
-      #LOG_LEVEL: INFO
+      LOG_LEVEL: DEBUG
+
     logging:
       driver: json-file        # default driver, but we tune it
       options:
         max-size: "10m"        # rotate after 10 MB
         max-file: "5" 
     depends_on: [kafka, db]
+    volumes:
+      - ./cookies.json:/app/cookies.json:ro
   
   db-init:             
     image: python:3.11-slim

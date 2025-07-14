@@ -1,7 +1,7 @@
 import os, asyncio, json, logging, random, time
 from datetime import datetime, date
 from typing import List
-
+from pathlib import Path 
 import sqlalchemy as sa
 from playwright.async_api import async_playwright, Response, Error as PwError, TimeoutError as PwTimeout
 
@@ -46,6 +46,8 @@ async def html_fallback(page) -> dict | None:
       • <script id="sigi-pb-data"> window._SSR_DATA_ = { product_detail: … }</script>
     """
     html = await page.content()
+    #debugger, mark when un-use
+    logger.debug("HTML head: %s…", html[:1000].replace("\n", "\\n")[:300])
 
     # 1. quick regex – fastest
     m = JSON_PAT.search(html)
@@ -117,9 +119,42 @@ async def signed_fetch(page, url: str) -> dict:
 # Core crawler
 # ──────────────────────────────────────────────────────────────────────────────
 # no sign..
+SAMESITE_MAP = {
+    "unspecified": "Lax",
+    "no_restriction": "None",
+    "lax": "Lax",
+    "strict": "Strict",
+    "none": "None",
+}
+
+def chrome_to_playwright(raw: list[dict]) -> list[dict]:
+    fixed = []
+    for c in raw:
+        if c.get("session") is True and "expiry" not in c:
+            # session cookie: let Playwright handle expiry
+            pass
+        elif "expiry" in c:
+            c["expires"] = int(c["expiry"])          # rename
+        # map sameSite if present
+        ss = c.get("sameSite")
+        if ss:
+            mapped = SAMESITE_MAP.get(ss.lower())
+            if mapped:
+                c["sameSite"] = mapped
+            else:
+                c.pop("sameSite", None)              # drop unknown value
+        # drop Chrome‑only keys Playwright dislikes
+        for k in ("hostOnly", "creation", "lastAccessed",
+                  "priority", "sameParty", "sourceScheme",
+                  "sourcePort", "expiry", "session"):
+            c.pop(k, None)
+        fixed.append(c)
+    return fixed
+
 
 PDP_URL = "https://www.tiktok.com/shop/pdp/{pid}"
 PAGE_DATA = "/api/shop/pdp_desktop/page_data/"
+
 async def crawl_product(product_id: int, kafka: KafkaWriter, pool: ProxyPool):
     proxy = await pool.next()
     pw_kwargs = {"proxy": {"server": f"http://{proxy}"}} if proxy else {}
@@ -128,7 +163,10 @@ async def crawl_product(product_id: int, kafka: KafkaWriter, pool: ProxyPool):
     browser    = await playwright.chromium.launch(headless=True, **pw_kwargs)
     context    = await browser.new_context()
     page       = await context.new_page()
-
+    cookie_file = Path("/app/cookies.json")
+    if cookie_file.exists():
+        raw = json.loads(cookie_file.read_text())
+        await context.add_cookies(chrome_to_playwright(raw))
     try:
         # warm cookies
         await page.goto("https://www.tiktok.com/about", wait_until="domcontentloaded")
@@ -234,7 +272,7 @@ async def crawl_product(product_id: int, kafka: KafkaWriter, pool: ProxyPool):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#seed fetch
+#feed fetch
 # ──────────────────────────────────────────────────────────────────────────────
 async def fetch_product_seeds(limit: int = 20) -> List[int]:
     eng = wait_engine()
