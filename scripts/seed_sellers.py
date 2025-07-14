@@ -1,3 +1,5 @@
+#legacy, don't seed seller anymore, since tiktok only shows product page on marketplace
+
 import sys, os, sqlalchemy as sa
 from datetime import datetime
 

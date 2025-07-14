@@ -6,7 +6,6 @@ from aiokafka import AIOKafkaConsumer
 from pydantic import BaseModel, Field, ValidationError, validator
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
-
 from etl.models import ENGINE, ProductList, ProductDetail
 from tiktok_scraper.config import DB_URL, KAFKA_BOOTSTRAP, KAFKA_TOPIC
 
