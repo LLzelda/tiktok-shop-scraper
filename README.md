@@ -1,4 +1,4 @@
-# rebuild & reset DB
+# 1. rebuild & reset DB
 docker compose build scraper
 
 docker compose down -v
@@ -12,7 +12,7 @@ docker compose run --rm \
   
   python -m scripts.init_db
 
-# 2. now seed
+# 2. seed
 docker compose run --rm \
   -e DB_URL=postgresql+psycopg://tiktok:tiktok@db:5432/tiktok \
   scraper \
@@ -22,7 +22,7 @@ python -m scripts.seed_product 1731176959119036424
 
 
 
-# start scraper
+# 3. start scraper
 docker compose up -d scraper
 
 docker compose logs -f scraper
