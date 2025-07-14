@@ -14,11 +14,11 @@ tiktok-shop-scraper/
 
 ## Setup Instructions
 
-### 1. Create Virtual Environment
+### 1. Create Virtual Environment (optional but recommended)
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 ```
 
 ### 2. Install Dependencies
@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ### 3. Save Sample HTML File
 
-The test file sample_product.html is not included in the repo.
+The test file sample_product.html is included in the repo, but if you want to test another product's detail page, you can do as follow.
 
 Please manually save a TikTok Shop product page in your browser:
 
