@@ -234,7 +234,7 @@ async def crawl_product(product_id: int, kafka: KafkaWriter, pool: ProxyPool):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Seed fetch
+#seed fetch
 # ──────────────────────────────────────────────────────────────────────────────
 async def fetch_product_seeds(limit: int = 20) -> List[int]:
     eng = wait_engine()

@@ -1,4 +1,3 @@
-"""Boot-strap all tables on container start (product-centric)."""
 import os
 import sqlalchemy as sa
 
