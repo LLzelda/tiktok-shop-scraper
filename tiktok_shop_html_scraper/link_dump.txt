@@ -1,0 +1,2 @@
+[01] <a class="refresh-button___StyledA-wyjjd0-0 VWPcJ secsdk_captcha_refresh"><span class="sc-bdVaJa iuZfrP [...]
+[02] <a class="feedback-button___StyledA-sc-1s5cqfw-0 dveDUf secsdk_captcha_feedback"><span class="sc-htpNat iCFDWe [...]
