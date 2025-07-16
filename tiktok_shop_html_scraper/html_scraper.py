@@ -31,7 +31,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
-
 from playwright.async_api import Browser, Page, async_playwright, TimeoutError as PlaywrightTimeout
 
 
@@ -177,22 +176,39 @@ async def _discover_pdp_urls(page: Page, limit: int) -> List[str]:
 
 PAGE_DATA_PATH = "/api/shop/pdp_desktop/page_data"
 
+def _find_product_module(node: Any):
+    """Depth-first search for the first dict that has the key 'product_module'."""
+    if isinstance(node, dict):
+        if "product_module" in node:
+            return node["product_module"]
+        for v in node.values():
+            found = _find_product_module(v)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_product_module(item)
+            if found:
+                return found
+    return None
+
 async def _extract_product(page: Page) -> dict:
-    """Grab product_module from the /pdp_desktop/page_data JSON XHR."""
-    # Navigate first
     await page.goto(page.url, timeout=30_000)
 
     try:
         resp = await page.wait_for_event(
             "response",
             predicate=lambda r: PAGE_DATA_PATH in r.url and r.status == 200,
-            timeout=20_000,          # ms
+            timeout=20_000,
         )
     except asyncio.TimeoutError:
         raise ValueError("page_data XHR not captured (timeout)")
 
     data = await resp.json()
-    return data["data"]["product_module"] 
+    product = _find_product_module(data)
+    if not product:
+        raise ValueError("'product_module' not found anywhere in JSON")
+    return product
 
 async def _scrape_one(url: str, page: Page, timeout: int):
     try:
