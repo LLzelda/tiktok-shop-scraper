@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Read categories.csv[id,name]  ➜  emit third_categories.csv[id,slug,url]
 """
