@@ -16,16 +16,13 @@ def load_cookies():
 
 async def scroll_and_collect(page: Page, n_scroll: int) -> list[str]:
     links = set()
-    for i in range(n_scroll+1):
+    for _ in range(n_scroll+1):
         anchors = await page.eval_on_selector_all(
             PDP_SEL, "els => els.map(e => e.getAttribute('href'))")
         for h in anchors:
             if h:
                 if h.startswith("/"): h = "https://www.tiktok.com" + h
                 links.add(h.split("?")[0])
-        ##break early
-        if links and i >= 1:
-            break
         await page.evaluate("window.scrollBy(0, window.innerHeight)")
         await page.wait_for_timeout(random.randint(600, 900))
     return list(links)
@@ -35,11 +32,7 @@ async def worker(queue: asyncio.Queue, out: Path, scrolls: int, ctx):
         url = await queue.get()
         page = await ctx.new_page()
         try:
-            #await page.goto(url, timeout=60000)
-            await page.goto(url, timeout=8_000, wait_until="domcontentloaded")
-            if await page.query_selector("#secsdk-captcha"):
-                print(f"⚠️  captcha - skipped  {url}")
-                continue
+            await page.goto(url, timeout=60000)
             pdps = await scroll_and_collect(page, scrolls)
             if pdps:
                 with out.open("a", newline="") as fh:
@@ -53,32 +46,19 @@ async def worker(queue: asyncio.Queue, out: Path, scrolls: int, ctx):
 
 async def main(third_csv: Path, output: Path, scrolls: int, concurrency: int):
     #urls = [r.strip() for r in third_csv.read_text().splitlines()[1:]]  # skip header
-    # urls = []
-    # with third_csv.open(newline='', encoding='utf-8') as fh:
-    #     reader = csv.DictReader(fh)          # 'id','slug','url'
-    #     for row in reader:
-    #         urls.append(row["url"])
+    urls = []
     with third_csv.open(newline='', encoding='utf-8') as fh:
-        reader = csv.DictReader(fh)          # header line is present
-        urls = [row["url"].strip() for row in reader if row["url"].startswith("http")]
-
-    print(f"Loaded {len(urls):,} third-level URLs")
+        reader = csv.DictReader(fh)          # 'id','slug','url'
+        for row in reader:
+            urls.append(row["url"])
     queue = asyncio.Queue()
     for u in urls: queue.put_nowait(u)
 
     cookies = load_cookies()
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        #ctx = await browser.new_context()
-        ctx = await browser.new_context(java_script_enabled=False)
+        ctx = await browser.new_context()
         if cookies: await ctx.add_cookies(cookies)
-        
-        async def _block(route, request):
-            if request.resource_type in ("image", "media", "font", "stylesheet"):
-                await route.abort()
-            else:
-                await route.continue_()
-        await ctx.route("**/*", _block)
 
         workers = [worker(queue, output, scrolls, ctx) for _ in range(concurrency)]
         await asyncio.gather(*workers)

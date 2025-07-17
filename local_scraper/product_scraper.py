@@ -50,30 +50,66 @@ def find_product_module(node: Any):
 async def scrape_one(url: str, page: Page, retries: int) -> dict | None:
     for attempt in range(retries + 1):
         try:
-            await page.goto(url, timeout=30_000)
-            resp = await page.wait_for_event(
-                "response",
-                predicate=lambda r: PAGE_DATA_PATH in r.url and r.status == 200,
-                timeout=20_000,
+            await page.goto(url, timeout=12_000, wait_until="domcontentloaded")
+
+            # 1) any JSON XHR whose body includes "product_module"
+            try:
+                resp = await page.wait_for_event(
+                    "response",
+                    predicate=lambda r:
+                        r.headers.get("content-type", "").startswith("application/json"),
+                    timeout=10_000,
+                )
+                txt = await resp.text()
+                if '"product_module"' in txt:
+                    data = json.loads(txt)
+                    product = find_product_module(data)
+                    if product:
+                        break
+            except TimeoutError:
+                pass
+
+            # 2) __UNIVERSAL_DATA__ (2025 rollout)
+            try:
+                await page.wait_for_function(
+                    "() => window.__UNIVERSAL_DATA__ && "
+                    "window.__UNIVERSAL_DATA__.productInfo && "
+                    "window.__UNIVERSAL_DATA__.productInfo.product_module",
+                    timeout=8_000,
+                )
+                product = await page.evaluate(
+                    "window.__UNIVERSAL_DATA__.productInfo.product_module")
+                break
+            except TimeoutError:
+                pass
+
+            # 3) legacy __NEXT_DATA__
+            await page.wait_for_function(
+                "() => window.__NEXT_DATA__ && "
+                "window.__NEXT_DATA__.props && "
+                "window.__NEXT_DATA__.props.pageProps && "
+                "window.__NEXT_DATA__.props.pageProps.productInfo && "
+                "window.__NEXT_DATA__.props.pageProps.productInfo.product_module",
+                timeout=8_000,
             )
-            data = await resp.json()
-            product = find_product_module(data)
-            if not product:
-                raise ValueError("product_module not found")
+            product = await page.evaluate(
+                "window.__NEXT_DATA__.props.pageProps.productInfo.product_module")
+            break
 
-            return {
-                "product_id": product.get("id"),
-                "url": url,
-                "scrape_ts": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
-                "product_module": product,
-            }
-
-        except (TimeoutError, ValueError) as e:
+        except TimeoutError as e:
             if attempt < retries:
-                await page.wait_for_timeout(random.randint(500, 1500))
+                await page.wait_for_timeout(random.randint(600, 1500))
                 continue
             print(f"[WARN] {url} … {e}", file=sys.stderr)
             return None
+
+    return {
+        "product_id": product.get("id"),
+        "url": url,
+        "scrape_ts": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+        "product_module": product,
+    }
+
 
 ###############################################################################
 # worker pool
