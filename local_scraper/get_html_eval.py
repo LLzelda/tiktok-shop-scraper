@@ -5,7 +5,6 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 import re
 
-# Load and normalize URLs
 df = pd.read_csv("pdp_links.csv")
 raw_urls = df.iloc[:, 0].dropna().unique().tolist()
 
@@ -19,15 +18,14 @@ def normalize_url(url):
 
 urls = [normalize_url(url) for url in raw_urls]
 
-# Output directory
 output_dir = Path("pdp_html_playwright")
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# Extract product ID from URL
+
 def extract_pid(url):
     return url.rstrip("/").split("/")[-1]
 
-# Async scraping function
+
 async def scrape_all(urls):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -52,7 +50,7 @@ async def scrape_all(urls):
                 """)
                 print(f"[PRICE] {pid}: {price_text}")
 
-                # Save full HTML
+                #Save full HTML
                 html = await page.content()
                 with open(output_dir / f"{pid}.html", "w", encoding="utf-8") as f:
                     f.write(html)

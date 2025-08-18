@@ -29,7 +29,7 @@ def extract_pid(url):
 
 async def scrape_all(urls):
     async with async_playwright() as p:
-        # Persistent context keeps login session
+        #persistent context keeps login session
         context = await p.chromium.launch_persistent_context(
             USER_DATA_DIR,
             headless=False,
@@ -37,9 +37,9 @@ async def scrape_all(urls):
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
-        # First-time login notice
-        print("\n🧠 If this is your first run, please log in manually in the opened browser.\n")
-        print("⏳ Once you're logged in, press ENTER here to continue scraping...")
+        #first-time login notice
+        print("\n If this is your first run, please log in manually in the opened browser.\n")
+        print(" Once you're logged in, press ENTER here to continue scraping...")
         input()
 
         for url in urls:

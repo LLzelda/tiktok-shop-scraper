@@ -6,7 +6,7 @@ from playwright.async_api import async_playwright
 import re
 from http.cookiejar import MozillaCookieJar
 
-# Load and normalize URLs
+#load and normalize URLs
 df = pd.read_csv("pdp_links.csv")
 raw_urls = df.iloc[:, 0].dropna().unique().tolist()
 
@@ -51,7 +51,7 @@ async def scrape_all(urls):
         browser = await p.chromium.launch(headless=False, slow_mo=50)
         context = await browser.new_context()
 
-        # Load cookies from cookies.txt
+        #load cookies from cookies.txt
         try:
             cookies = parse_cookies_txt(COOKIES_TXT)
             await context.add_cookies(cookies)

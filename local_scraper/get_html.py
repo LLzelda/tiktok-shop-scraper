@@ -4,7 +4,6 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 import re
 
-# Load links
 df = pd.read_csv("pdp_links.csv")
 raw_urls = df.iloc[:, 0].dropna().unique().tolist()
 
@@ -44,13 +43,12 @@ async def scrape_all(urls):
                 #wait for price element to render
                 await page.wait_for_selector("span.flex.flex-row.items-baseline", timeout=15000)
 
-                # for debug
                 try:
-                    # Locate the correct price block (2nd .items-baseline)
+                    #locate the correct price block (2nd .items-baseline)
                     price_container = page.locator("span.flex.flex-row.items-baseline").nth(1)
                     spans = price_container.locator("span")
 
-                    # Try to extract each part safely
+                    #try to extract each part safely
                     dollar_sign = await spans.nth(0).inner_text()
                     dollars = await spans.nth(1).inner_text()
                     

@@ -20,16 +20,16 @@ def normalize_url(url):
 
 urls = [normalize_url(url) for url in raw_urls]
 
-# Output directories
+
 output_dir = Path("pdp_html_playwright")
 output_dir.mkdir(parents=True, exist_ok=True)
 json_log = Path("price_log.csv")
 
-# Extract product ID from URL
+
 def extract_pid(url):
     return url.rstrip("/").split("/")[-1]
 
-# Async scraping function
+
 async def scrape_all(urls):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -52,8 +52,7 @@ async def scrape_all(urls):
                         currency = price_data.get("currency_symbol", "$")
                         price_info["price"] = f"{currency}{real_price / 100:.2f}" if isinstance(real_price, int) else real_price
                 except Exception:
-                    pass  # Ignore JSON errors
-
+                    pass
             page.on("response", handle_response)
 
             try:
@@ -75,8 +74,8 @@ async def scrape_all(urls):
 
         await browser.close()
 
-        # Save price log
+
         pd.DataFrame(results).to_csv(json_log, index=False)
 
-# Run it
+
 asyncio.run(scrape_all(urls))

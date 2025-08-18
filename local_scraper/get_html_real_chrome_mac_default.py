@@ -6,7 +6,7 @@ from playwright.async_api import async_playwright
 import re
 import os
 
-# Load and normalize TikTok product URLs
+#load and normalize TikTok product URLs
 df = pd.read_csv("pdp_links.csv")
 raw_urls = df.iloc[:, 0].dropna().unique().tolist()
 
@@ -18,11 +18,11 @@ def normalize_url(url):
 
 urls = [normalize_url(url) for url in raw_urls]
 
-# Output directory
+#output directory
 output_dir = Path("pdp_html_playwright")
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# Set macOS Chrome Default user profile path
+#set macOS Chrome Default user profile path
 CHROME_PROFILE_PATH = os.path.expanduser("~/Library/Application Support/Google/Chrome/Default")
 
 def extract_pid(url):

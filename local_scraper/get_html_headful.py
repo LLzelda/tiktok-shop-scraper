@@ -45,7 +45,6 @@ async def scrape_all(urls):
 
                 await page.wait_for_load_state("networkidle", timeout=20000)
 
-                # Optional: basic price check from visible content
                 price_text = await page.evaluate("""
                     () => {
                         const container = document.querySelectorAll("span.flex.flex-row.items-baseline")[1];
@@ -62,7 +61,7 @@ async def scrape_all(urls):
 
             except Exception as e:
                 print(f"[ERROR] {url} - {e}")
-            # Do not close the page; reuse it
+            #do not close the page; reuse it
         await browser.close()
 
 asyncio.run(scrape_all(urls))
